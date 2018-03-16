@@ -13,29 +13,33 @@ type udpMsgQue struct {
 	cread    chan []byte  //写入通道
 	addr     *net.UDPAddr
 	lastTick int64
+	sync.Mutex
 }
 
 func (r *udpMsgQue) GetNetType() NetType {
 	return NetTypeUdp
 }
+
 func (r *udpMsgQue) Stop() {
 	if atomic.CompareAndSwapInt32(&r.stop, 0, 1) {
-		if r.init {
-			r.handler.OnDelMsgQue(r)
-		}
+		Go(func() {
+			if r.init {
+				r.handler.OnDelMsgQue(r)
+			}
+			r.available = false
+			if r.cread != nil {
+				close(r.cread)
+			}
 
-		if r.cread != nil {
-			close(r.cread)
-		}
+			udpMapLock.Lock()
+			delete(udpMap, r.addr.String())
+			udpMapLock.Unlock()
 
-		udpMapLock.Lock()
-		delete(udpMap, r.addr.String())
-		udpMapLock.Unlock()
-
-		if IsStop() && len(udpMap) == 0 && r.conn != nil {
-			r.conn.Close()
-		}
-		r.BaseStop()
+			if IsStop() && len(udpMap) == 0 && r.conn != nil {
+				r.conn.Close()
+			}
+			r.BaseStop()
+		})
 	}
 }
 
@@ -79,11 +83,11 @@ func (r *udpMsgQue) read() {
 			break
 		}
 		var msg *Message
-		var head *MessageHead
 		if r.msgTyp == MsgTypeCmd {
 			msg = &Message{Data: data}
 		} else {
-			if head = NewMessageHead(data); head == nil {
+			head := MessageHeadFromByte(data)
+			if head == nil {
 				break
 			}
 			if head.Len > 0 {
@@ -141,13 +145,8 @@ func (r *udpMsgQue) write() {
 				r.conn.WriteToUDP(m.Data, r.addr)
 			}
 		} else {
-			if m.Head != nil && m.Data != nil {
-				data := make([]byte, m.Head.Len+MsgHeadSize)
-				copy(data, m.Head.Bytes())
-				copy(data[MsgHeadSize:], m.Data)
-				r.conn.WriteToUDP(data, r.addr)
-			} else {
-				r.conn.WriteToUDP(m.Head.Bytes(), r.addr)
+			if m.Head != nil || m.Data != nil {
+				r.conn.WriteToUDP(m.Bytes(), r.addr)
 			}
 		}
 
@@ -174,10 +173,12 @@ func (r *udpMsgQue) sendRead(data []byte, n int) (re bool) {
 var udpMap map[string]*udpMsgQue = map[string]*udpMsgQue{}
 var udpMapLock sync.Mutex
 
-func (r *udpMsgQue) listen() {
-	data := make([]byte, 1<<22)
+func (r *udpMsgQue) listenTrue() {
+	data := make([]byte, 1<<16)
 	for !r.IsStop() {
+		r.Lock()
 		n, addr, err := r.conn.ReadFromUDP(data)
+		r.Unlock()
 		if err != nil {
 			if err.(net.Error).Timeout() {
 				continue
@@ -201,9 +202,16 @@ func (r *udpMsgQue) listen() {
 			LogError("drop msg because msgque full msgqueid:%v", msgque.id)
 		}
 	}
+}
 
+func (r *udpMsgQue) listen() {
+	for i := 0; i < UdpServerGoCnt; i++ {
+		Go(func() {
+			r.listenTrue()
+		})
+	}
+	r.listenTrue()
 	r.Stop()
-	r.conn.Close()
 }
 
 func newUdpAccept(conn *net.UDPConn, msgtyp MsgType, handler IMsgHandler, parser *Parser, addr *net.UDPAddr) *udpMsgQue {
@@ -213,6 +221,7 @@ func newUdpAccept(conn *net.UDPConn, msgtyp MsgType, handler IMsgHandler, parser
 			cwrite:        make(chan *Message, 64),
 			msgTyp:        msgtyp,
 			handler:       handler,
+			available:     true,
 			timeout:       DefMsgQueTimeout,
 			connTyp:       ConnTypeAccept,
 			parserFactory: parser,
@@ -250,12 +259,14 @@ func newUdpListen(conn *net.UDPConn, msgtyp MsgType, handler IMsgHandler, parser
 			id:            atomic.AddUint32(&msgQueId, 1),
 			msgTyp:        msgtyp,
 			handler:       handler,
+			available:     true,
 			parserFactory: parser,
 			connTyp:       ConnTypeListen,
 		},
 		conn: conn,
 	}
-
+	conn.SetReadBuffer(1 << 24)
+	conn.SetWriteBuffer(1 << 24)
 	msgqueMapSync.Lock()
 	msgqueMap[msgque.id] = &msgque
 	msgqueMapSync.Unlock()

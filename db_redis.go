@@ -41,6 +41,34 @@ func (r *Redis) ScriptStr(cmd int, keys []string, args ...interface{}) (string, 
 	return str, nil
 }
 
+func (r *Redis) ScriptStrArray(cmd int, keys []string, args ...interface{}) ([]string, error) {
+	data, err := r.Script(cmd, keys, args...)
+	if err != nil {
+		LogError("redis script failed err:%v", err)
+		return nil, ErrDBErr
+	}
+	errcode, ok := data.(int64)
+	if ok {
+		return nil, GetError(uint16(errcode))
+	}
+
+	iArray, ok := data.([]interface{})
+	if !ok {
+		return nil, ErrDBDataType
+	}
+
+	strArray := []string{}
+	for _, v := range iArray {
+		if str, ok := v.(string); ok {
+			strArray = append(strArray, str)
+		} else {
+			return nil, ErrDBDataType
+		}
+	}
+
+	return strArray, nil
+}
+
 func (r *Redis) ScriptInt64(cmd int, keys []string, args ...interface{}) (int64, error) {
 	data, err := r.Script(cmd, keys, args...)
 	if err != nil {
@@ -114,17 +142,24 @@ func (r *RedisManager) Sub(fun func(channel, data string), channels ...string) {
 	for _, v := range r.subMap {
 		pubsub := v.Subscribe(channels...)
 		v.pubsub = pubsub
-		Go(func() {
+		goForRedis(func() {
 			for IsRuning() {
 				msg, err := pubsub.ReceiveMessage()
 				if err == nil {
-					fun(msg.Channel, msg.Payload)
+					Go(func() { fun(msg.Channel, msg.Payload) })
 				} else if _, ok := err.(net.Error); !ok {
 					break
 				}
 			}
 		})
 	}
+}
+
+func (r *RedisManager) Exist(id int) bool {
+	r.lock.Lock()
+	_, ok := r.dbs[id]
+	r.lock.Unlock()
+	return ok
 }
 
 func (r *RedisManager) Add(id int, conf *RedisConfig) {
@@ -150,11 +185,11 @@ func (r *RedisManager) Add(id int, conf *RedisConfig) {
 		if len(r.channels) > 0 {
 			pubsub := re.Subscribe(r.channels...)
 			re.pubsub = pubsub
-			Go(func() {
+			goForRedis(func() {
 				for IsRuning() {
 					msg, err := pubsub.ReceiveMessage()
 					if err == nil {
-						r.fun(msg.Channel, msg.Payload)
+						Go(func() { r.fun(msg.Channel, msg.Payload) })
 					} else if _, ok := err.(net.Error); !ok {
 						break
 					}
@@ -203,4 +238,11 @@ func NewRedisManager(conf *RedisConfig) *RedisManager {
 	redisManager.Add(0, conf)
 	redisManagers = append(redisManagers, redisManager)
 	return redisManager
+}
+
+func RedisError(err error) bool {
+	if err == redis.Nil {
+		return false
+	}
+	return err != nil
 }

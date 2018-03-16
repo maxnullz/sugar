@@ -13,7 +13,7 @@ func ReadConfigFromJson(path string, v interface{}) error {
 
 	err = json.Unmarshal(data, v)
 	if err != nil {
-		return err
+		return ErrJsonUnPack
 	}
 	return nil
 }

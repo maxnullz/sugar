@@ -58,6 +58,8 @@ type IMsgQue interface {
 
 	SetUser(user interface{})
 	GetUser() interface{}
+	SetExtData(extData interface{})
+	GetExtData() interface{}
 
 	tryCallback(msg *Message) (re bool)
 }
@@ -76,8 +78,10 @@ type msgQue struct {
 	timeout       int //传输超时
 
 	init         bool
+	available    bool
 	callback     map[int]chan *Message
 	user         interface{}
+	extData      interface{}
 	callbackLock sync.Mutex
 }
 
@@ -85,16 +89,26 @@ func (r *msgQue) SetUser(user interface{}) {
 	r.user = user
 }
 
+func (r *msgQue) Available() bool {
+	return r.available
+}
+
 func (r *msgQue) GetUser() interface{} {
 	return r.user
+}
+
+func (r *msgQue) SetExtData(extData interface{}) {
+	r.extData = extData
+}
+
+func (r *msgQue) GetExtData() interface{} {
+	return r.extData
 }
 
 func (r *msgQue) GetHandler() IMsgHandler {
 	return r.handler
 }
-func (r *msgQue) Available() bool {
-	return true
-}
+
 func (r *msgQue) GetMsgType() MsgType {
 	return r.msgTyp
 }
@@ -119,7 +133,7 @@ func (r *msgQue) Reconnect(t int) {
 }
 
 func (r *msgQue) Send(m *Message) (re bool) {
-	if m == nil {
+	if m == nil || !r.available {
 		return
 	}
 	defer func() {
@@ -319,6 +333,22 @@ func (r *EchoMsgHandler) OnProcessMsg(msgque IMsgQue, msg *Message) bool {
 
 func StartServer(addr string, typ MsgType, handler IMsgHandler, parser *Parser) error {
 	addrs := strings.Split(addr, "://")
+	if addrs[0] == "tcp" || addrs[0] == "all" {
+		listen, err := net.Listen("tcp", addrs[1])
+		if err == nil {
+			msgque := newTcpListen(listen, typ, handler, parser, addr)
+			Go(func() {
+				cid := AddStopCheck("msgque listen")
+				LogDebug("process listen for msgque:%d", msgque.id)
+				msgque.listen()
+				LogDebug("process listen end for msgque:%d", msgque.id)
+				RemoveStopCheck(cid)
+			})
+		} else {
+			LogError("listen on %s failed, errstr:%s", addr, err)
+			return err
+		}
+	}
 	if addrs[0] == "udp" || addrs[0] == "all" {
 		naddr, err := net.ResolveUDPAddr("udp", addrs[1])
 		if err != nil {
@@ -326,21 +356,8 @@ func StartServer(addr string, typ MsgType, handler IMsgHandler, parser *Parser) 
 			return err
 		}
 		conn, err := net.ListenUDP("udp", naddr)
-		if err != nil {
-			LogError("listen on %s failed, errstr:%s", addr, err)
-			return err
-		}
-		msgque := newUdpListen(conn, typ, handler, parser, addr)
-		Go(func() {
-			LogDebug("process listen for msgque:%d", msgque.id)
-			msgque.listen()
-			LogDebug("process listen end for msgque:%d", msgque.id)
-		})
-	}
-	if addrs[0] == "tcp" || addrs[0] == "all" {
-		listen, err := net.Listen("tcp", addrs[1])
 		if err == nil {
-			msgque := newTcpListen(listen, typ, handler, parser, addr)
+			msgque := newUdpListen(conn, typ, handler, parser, addr)
 			Go(func() {
 				LogDebug("process listen for msgque:%d", msgque.id)
 				msgque.listen()
@@ -348,8 +365,8 @@ func StartServer(addr string, typ MsgType, handler IMsgHandler, parser *Parser) 
 			})
 		} else {
 			LogError("listen on %s failed, errstr:%s", addr, err)
+			return err
 		}
-		return err
 	}
 	return nil
 }

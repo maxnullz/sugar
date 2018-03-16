@@ -29,7 +29,7 @@ func setValue(fieldv reflect.Value, item, data, path string, f *GenConfigObj) er
 	} else {
 		v, err := ParseBaseKind(fieldv.Kind(), data)
 		if err != nil {
-			LogError("csv read error path:%v err:%v field:%v", path, err, item)
+			LogError("csv read error path:%v err:%v field:%v kind:%v", path, err, item, fieldv.Kind())
 			return err
 		}
 		fieldv.Set(reflect.ValueOf(v))

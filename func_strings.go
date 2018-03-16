@@ -44,7 +44,11 @@ func StrTrim(s string) string {
 	return strings.TrimSpace(s)
 }
 
-func Contains(s, substr string) bool {
+func StrContains(s, substr string) bool {
+	return strings.Contains(s, substr)
+}
+
+func ContainsStr(s, substr string) bool {
 	return strings.Contains(s, substr)
 }
 
@@ -70,4 +74,12 @@ func StrToUpper(s string) string {
 
 func ToUpperStr(s string) string {
 	return strings.ToUpper(s)
+}
+
+func StrTrimRight(s, cutset string) string {
+	return strings.TrimRight(s, cutset)
+}
+
+func TrimRightStr(s, cutset string) string {
+	return strings.TrimRight(s, cutset)
 }

@@ -10,9 +10,22 @@ func Pow(x, y float64) float64 {
 	return math.Pow(x, y)
 }
 
-//利用时间取number区间的随机值
+//返回x的二次方根
+func Sqrt(x float64) float64 {
+	return math.Sqrt(x)
+}
+
+//取0-number区间的随机值
 func RandNumber(number int) int {
 	return rand.Intn(number)
+}
+
+//min和max之间的随机数
+func RandNumBetween(min, max int) int {
+	if min >= max || min == 0 || max == 0 {
+		return max
+	}
+	return rand.Intn(max-min) + min
 }
 
 //正态分布:根据标准差和期望生成不同的正态分布值,sd标准差,mean期望

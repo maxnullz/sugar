@@ -15,7 +15,6 @@ type tcpMsgQue struct {
 	listener   net.Listener //监听
 	network    string
 	address    string
-	available  bool
 	wait       sync.WaitGroup
 	connecting int32
 }
@@ -25,26 +24,24 @@ func (r *tcpMsgQue) GetNetType() NetType {
 }
 func (r *tcpMsgQue) Stop() {
 	if atomic.CompareAndSwapInt32(&r.stop, 0, 1) {
-		r.available = false
-		if r.init {
-			r.handler.OnDelMsgQue(r)
-			if r.connecting == 1 {
-				return
+		Go(func() {
+			if r.init {
+				r.handler.OnDelMsgQue(r)
+				if r.connecting == 1 {
+					r.available = false
+					return
+				}
 			}
-		}
-
-		if r.listener != nil {
-			if tcp, ok := r.listener.(*net.TCPListener); ok {
-				tcp.Close()
+			r.available = false
+			if r.listener != nil {
+				if tcp, ok := r.listener.(*net.TCPListener); ok {
+					tcp.Close()
+				}
 			}
-		}
 
-		r.BaseStop()
+			r.BaseStop()
+		})
 	}
-}
-
-func (r *tcpMsgQue) Available() bool {
-	return r.available
 }
 
 func (r *tcpMsgQue) IsStop() bool {
@@ -149,7 +146,7 @@ func (r *tcpMsgQue) writeMsg() {
 
 			if writeCount >= MsgHeadSize && m.Data != nil {
 				n, err := r.conn.Write(m.Data[writeCount-MsgHeadSize : int(m.Head.Len)])
-				if err == io.EOF {
+				if err != nil {
 					LogError("msgque write id:%v err:%v", r.id, err)
 					break
 				}
@@ -285,10 +282,10 @@ func (r *tcpMsgQue) connect() {
 		r.Stop()
 	} else {
 		r.conn = c
+		r.available = true
 		LogInfo("connect to addr:%s ok msgque:%d", r.address, r.id)
 		if r.handler.OnConnectComplete(r, true) {
 			atomic.CompareAndSwapInt32(&r.connecting, 1, 0)
-			r.available = true
 			Go(func() {
 				LogInfo("process read for msgque:%d", r.id)
 				r.read()

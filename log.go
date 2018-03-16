@@ -8,7 +8,6 @@ import (
 	"runtime"
 	"strings"
 	"sync/atomic"
-	"time"
 )
 
 type ILogger interface {
@@ -59,7 +58,7 @@ func (r *FileLogger) Write(str string) {
 	if r.MaxSize > 0 && newsize >= r.MaxSize {
 		r.file.Close()
 		r.file = nil
-		newpath := r.dirname + "/" + r.filename + fmt.Sprintf("_%d", Timestamp) + r.extname
+		newpath := r.dirname + "/" + r.filename + fmt.Sprintf("_%v", Date()) + r.extname
 		os.Rename(r.Path, newpath)
 		file, err := os.OpenFile(r.Path, os.O_RDWR|os.O_APPEND|os.O_CREATE, 0777)
 		if err == nil {
@@ -155,7 +154,7 @@ func (r *Log) start() {
 				if ok {
 					c.file.Close()
 					c.file = nil
-					newpath := c.dirname + "/" + c.filename + fmt.Sprintf("_%d", Timestamp) + c.extname
+						newpath := c.dirname + "/" + c.filename + fmt.Sprintf("_%v", Date()) + c.extname
 					os.Rename(c.Path, newpath)
 					file, err := os.OpenFile(c.Path, os.O_RDWR|os.O_APPEND|os.O_CREATE, 0777)
 					if err == nil {
@@ -241,7 +240,7 @@ func (r *Log) write(levstr string, v ...interface{}) {
 	_, file, line, ok := runtime.Caller(3)
 	if ok {
 		i := strings.LastIndex(file, "/") + 1
-		prefix = fmt.Sprintf("[%s][%s][%s:%d]:", levstr, time.Now().Format("2006-01-02 15:04:05"), (string)(([]byte(file))[i:]), line)
+		prefix = fmt.Sprintf("[%s][%s][%s:%d]:", levstr, Date(), (string)(([]byte(file))[i:]), line)
 	}
 	if len(v) > 1 {
 		r.cwrite <- prefix + fmt.Sprintf(v[0].(string), v[1:]...)
@@ -252,31 +251,44 @@ func (r *Log) write(levstr string, v ...interface{}) {
 
 func (r *Log) Debug(v ...interface{}) {
 	if r.level <= LogLevelDebug {
-		r.write("DEBUG", v...)
+		r.write("D", v...)
 	}
 }
 
 func (r *Log) Info(v ...interface{}) {
 	if r.level <= LogLevelInfo {
-		r.write("INFO", v...)
+		r.write("I", v...)
 	}
 }
 
 func (r *Log) Warn(v ...interface{}) {
 	if r.level <= LogLevelWarn {
-		r.write("WARN", v...)
+		r.write("W", v...)
 	}
 }
 
 func (r *Log) Error(v ...interface{}) {
 	if r.level <= LogLevelError {
-		r.write("ERROR", v...)
+		r.write("E", v...)
 	}
 }
 
 func (r *Log) Fatal(v ...interface{}) {
 	if r.level <= LogLevelFatal {
 		r.write("FATAL", v...)
+	}
+}
+
+func (r *Log) Write(v ...interface{}) {
+	defer func() { recover() }()
+	if r.IsStop() {
+		return
+	}
+
+	if len(v) > 1 {
+		r.cwrite <- fmt.Sprintf(v[0].(string), v[1:]...)
+	} else if len(v) > 0 {
+		r.cwrite <- fmt.Sprint(v[0])
 	}
 }
 
@@ -321,4 +333,17 @@ func LogFatal(v ...interface{}) {
 
 func LogWarn(v ...interface{}) {
 	DefLog.Warn(v...)
+}
+
+func LogStack() {
+	buf := make([]byte, 1<<12)
+	LogError(string(buf[:runtime.Stack(buf, false)]))
+}
+
+func LogSimpleStack() string {
+	_, file, line, _ := runtime.Caller(2)
+	i := strings.LastIndex(file, "/") + 1
+	i = strings.LastIndex((string)(([]byte(file))[:i-1]), "/") + 1
+
+	return Sprintf("%s:%d", (string)(([]byte(file))[i:]), line)
 }

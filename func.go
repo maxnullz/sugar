@@ -4,21 +4,34 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 	"errors"
-	"io/ioutil"
-	"net"
 	"os"
 	"os/exec"
 	"os/signal"
-	"path"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
 )
+
+func AddStopCheck(cs string) uint64 {
+	id := atomic.AddUint64(&stopCheckIndex, 1)
+	if id == 0 {
+		id = atomic.AddUint64(&stopCheckIndex, 1)
+	}
+	stopCheckMap.Lock()
+	stopCheckMap.M[id] = cs
+	stopCheckMap.Unlock()
+	return id
+}
+
+func RemoveStopCheck(id uint64) {
+	stopCheckMap.Lock()
+	delete(stopCheckMap.M, id)
+	stopCheckMap.Unlock()
+}
 
 func Stop() {
 	if !atomic.CompareAndSwapInt32(&stop, 0, 1) {
@@ -35,27 +48,25 @@ func Stop() {
 		delete(stopMap, k)
 	}
 	stopMapLock.Unlock()
-
 	stopChan <- nil
 
-	for _, v := range redisManagers {
-		v.close()
+	for sc := 0; !waitAll.TryWait(); sc++ {
+		Sleep(1)
+		if sc >= 3000 {
+			LogError("Server Stop Timeout")
+			stopCheckMap.Lock()
+			for _, v := range stopCheckMap.M {
+				LogError("Server Stop Timeout CS:%v", v)
+			}
+			for _, v := range stopCheckMap.IM {
+				LogError("Server Stop Timeout CI:%v", v)
+			}
+			stopCheckMap.Unlock()
+			sc = 0
+		}
 	}
 
 	LogInfo("Server Stop")
-	waitAll.Wait()
-
-	if !atomic.CompareAndSwapInt32(&stopForLog, 0, 1) {
-		return
-	}
-
-	stopMapForLogLock.Lock()
-	for k, v := range stopMapForLog {
-		close(v)
-		delete(stopMapForLog, k)
-	}
-	stopMapForLogLock.Unlock()
-	waitAllForLog.Wait()
 }
 
 func IsStop() bool {
@@ -64,10 +75,6 @@ func IsStop() bool {
 
 func IsRuning() bool {
 	return stop == 0
-}
-
-func Now() time.Time {
-	return time.Now()
 }
 
 func CmdAct(cmd, act uint8) int {
@@ -89,149 +96,37 @@ func MD5Bytes(s []byte) string {
 	return hex.EncodeToString(cipherStr)
 }
 
-func Go(fn func()) {
-	waitAll.Add(1)
-	var debugStr string
-	id := atomic.AddUint32(&goid, 1)
-	c := atomic.AddInt32(&gocount, 1)
-	if DefLog.Level() <= LogLevelDebug {
-		_, file, line, _ := runtime.Caller(1)
-		i := strings.LastIndex(file, "/") + 1
-		i = strings.LastIndex((string)(([]byte(file))[:i-1]), "/") + 1
-		debugStr = Sprintf("%s:%d", (string)(([]byte(file))[i:]), line)
-		LogDebug("goroutine start id:%d count:%d from:%s", id, id, debugStr)
-	}
-	go func() {
-		Try(fn, nil)
-		waitAll.Done()
-		c = atomic.AddInt32(&gocount, ^int32(0))
-
-		if DefLog.Level() <= LogLevelDebug {
-			LogDebug("goroutine end id:%d count:%d from:%s", id, c, debugStr)
-		}
-	}()
-}
-
-func UnixMs() int64 {
-	return time.Now().UnixNano() / 1000000
-}
-
-func GoArgs(fn func(...interface{}), args ...interface{}) {
-	waitAll.Add(1)
-	var debugStr string
-	id := atomic.AddUint32(&goid, 1)
-	c := atomic.AddInt32(&gocount, 1)
-	if DefLog.Level() <= LogLevelDebug {
-		_, file, line, _ := runtime.Caller(1)
-		i := strings.LastIndex(file, "/") + 1
-		i = strings.LastIndex((string)(([]byte(file))[:i-1]), "/") + 1
-		debugStr = Sprintf("%s:%d", (string)(([]byte(file))[i:]), line)
-		LogDebug("goroutine start id:%d count:%d from:%s", id, id, debugStr)
-	}
-
-	go func() {
-		Try(func() { fn(args...) }, nil)
-
-		waitAll.Done()
-		c = atomic.AddInt32(&gocount, ^int32(0))
-		if DefLog.Level() <= LogLevelDebug {
-			LogDebug("goroutine end id:%d count:%d from:%s", id, c, debugStr)
-		}
-	}()
-}
-
-func Go2(fn func(cstop chan struct{})) bool {
-	if IsStop() {
-		return false
-	}
-	waitAll.Add(1)
-	var debugStr string
-	id := atomic.AddUint32(&goid, 1)
-	c := atomic.AddInt32(&gocount, 1)
-	if DefLog.Level() <= LogLevelDebug {
-		_, file, line, _ := runtime.Caller(1)
-		i := strings.LastIndex(file, "/") + 1
-		i = strings.LastIndex((string)(([]byte(file))[:i-1]), "/") + 1
-		debugStr = Sprintf("%s:%d", (string)(([]byte(file))[i:]), line)
-		LogDebug("goroutine start id:%d count:%d from:%s", id, id, debugStr)
-	}
-
-	go func() {
-		id := atomic.AddUint64(&goId, 1)
-		cstop := make(chan struct{})
-		stopMapLock.Lock()
-		stopMap[id] = cstop
-		stopMapLock.Unlock()
-		Try(func() { fn(cstop) }, nil)
-
-		stopMapLock.Lock()
-		if _, ok := stopMap[id]; ok {
-			close(cstop)
-			delete(stopMap, id)
-		}
-		stopMapLock.Unlock()
-
-		waitAll.Done()
-		c = atomic.AddInt32(&gocount, ^int32(0))
-		if DefLog.Level() <= LogLevelDebug {
-			LogDebug("goroutine end id:%d count:%d from:%s", id, c, debugStr)
-		}
-	}()
-	return true
-}
-
-func goForLog(fn func(cstop chan struct{})) bool {
-	if IsStop() {
-		return false
-	}
-	waitAllForLog.Add(1)
-
-	go func() {
-		id := atomic.AddUint64(&goId, 1)
-		cstop := make(chan struct{})
-		stopMapForLogLock.Lock()
-		stopMapForLog[id] = cstop
-		stopMapForLogLock.Unlock()
-		fn(cstop)
-
-		stopMapForLogLock.Lock()
-		if _, ok := stopMapForLog[id]; ok {
-			close(cstop)
-			delete(stopMapForLog, id)
-		}
-		stopMapForLogLock.Unlock()
-
-		waitAllForLog.Done()
-	}()
-	return true
-}
-
-func WaitForSystemExit() {
+func WaitForSystemExit(atexit ...func()) {
 	statis.StartTime = time.Now()
 	stopChan = make(chan os.Signal, 1)
 	signal.Notify(stopChan, os.Interrupt, os.Kill, syscall.SIGTERM)
 	for stop == 0 {
 		select {
 		case <-stopChan:
-			LogDebug("handle stop signal!!!!!!")
 			Stop()
 		}
 	}
 	Stop()
+	for _, v := range atexit {
+		v()
+	}
+	for _, v := range redisManagers {
+		v.close()
+	}
+	waitAllForRedis.Wait()
+	if !atomic.CompareAndSwapInt32(&stopForLog, 0, 1) {
+		return
+	}
+	stopMapForLogLock.Lock()
+	for k, v := range stopMapForLog {
+		close(v)
+		delete(stopMapForLog, k)
+	}
+	stopMapForLogLock.Unlock()
+	waitAllForLog.Wait()
 }
 
-func PathExists(path string) bool {
-	_, err := os.Stat(path)
-	if err == nil {
-		return true
-	}
-	if os.IsNotExist(err) {
-		return false
-	}
-	return false
-}
-
-func Daemon(skip []string) {
+func Daemon(skip ...string) {
 	if os.Getppid() != 1 {
 		filePath, _ := filepath.Abs(os.Args[0])
 		newCmd := []string{}
@@ -251,11 +146,6 @@ func Daemon(skip []string) {
 		cmd.Args = newCmd
 		cmd.Start()
 	}
-}
-
-func LogStack() {
-	buf := make([]byte, 1<<12)
-	LogError(string(buf[:runtime.Stack(buf, false)]))
 }
 
 func GetStatis() *Statis {
@@ -298,79 +188,6 @@ func Itoa(num interface{}) string {
 	return ""
 }
 
-var allIp []string
-
-func GetSelfIp(ifnames ...string) []string {
-	if allIp != nil {
-		return allIp
-	}
-	inters, _ := net.Interfaces()
-	if len(ifnames) == 0 {
-		ifnames = []string{"eth", "lo", "无线网络连接", "本地连接"}
-	}
-
-	filterFunc := func(name string) bool {
-		for _, v := range ifnames {
-			if strings.Index(name, v) != -1 {
-				return true
-			}
-		}
-		return false
-	}
-
-	for _, inter := range inters {
-		if !filterFunc(inter.Name) {
-			continue
-		}
-		addrs, _ := inter.Addrs()
-		for _, a := range addrs {
-			if ipnet, ok := a.(*net.IPNet); ok {
-				if ipnet.IP.To4() != nil {
-					allIp = append(allIp, ipnet.IP.String())
-				}
-			}
-		}
-	}
-	return allIp
-}
-
-func GetSelfIntraIp(ifnames ...string) (ips []string) {
-	all := GetSelfIp(ifnames...)
-	for _, v := range all {
-		ipA := strings.Split(v, ".")[0]
-		if ipA == "10" || ipA == "172" || ipA == "192" || v == "127.0.0.1" {
-			ips = append(ips, v)
-		}
-	}
-
-	return
-}
-
-func GetSelfExtraIp(ifnames ...string) (ips []string) {
-	all := GetSelfIp(ifnames...)
-	for _, v := range all {
-		ipA := strings.Split(v, ".")[0]
-		if ipA == "10" || ipA == "172" || ipA == "192" || v == "127.0.0.1" {
-			continue
-		}
-		ips = append(ips, v)
-	}
-
-	return
-}
-
-func ReadFile(path string) ([]byte, error) {
-	data, err := ioutil.ReadFile(path)
-	if err != nil {
-		return nil, ErrFileRead
-	}
-	return data, nil
-}
-
-func PathBase(p string) string {
-	return path.Base(p)
-}
-
 func Try(fun func(), handler func(interface{})) {
 	defer func() {
 		if err := recover(); err != nil {
@@ -380,6 +197,8 @@ func Try(fun func(), handler func(interface{})) {
 			} else {
 				handler(err)
 			}
+			atomic.AddInt32(&statis.PanicCount, 1)
+			statis.LastPanic = int(Timestamp)
 		}
 	}()
 	fun()
