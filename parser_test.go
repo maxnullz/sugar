@@ -1,28 +1,28 @@
-package ngxnet
+package sugar
 
 import (
 	"testing"
 )
 
-type GetGamerLevel struct {
+type GetUserLevel struct {
 	Get   string `match:"k"`
-	Gamer int
+	User  int
 	Level int `match:"k"`
 }
 
 type GetGamerRmb struct {
-	Get   string `match:"k"`
-	Gamer int
-	Rmb   int `match:"k"`
+	Get  string `match:"k"`
+	User int
+	Rmb  int `match:"k"`
 }
 
 func Test_CmdParser(t *testing.T) {
 	pm := Parser{Type: ParserTypeCmd}
-	pm.RegisterMsg(&GetGamerLevel{}, nil)
+	pm.RegisterMsg(&GetUserLevel{}, nil)
 
 	p := pm.Get()
-	m, _ := p.ParseC2S(NewStrMsg("get gamer 1 level"))
-	Printf("%#v\n", m.C2S().(*GetGamerLevel))
+	m, _ := p.ParseC2S(NewStrMsg("get user 1 level"))
+	t.Logf("%#v\n", m.C2S().(*GetUserLevel))
 
-	Println(m.C2SString())
+	t.Log(m.C2SString())
 }

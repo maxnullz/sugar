@@ -1,0 +1,23 @@
+[[constraint]]
+  branch = "master"
+  name = "go.uber.org/zap"
+
+[[constraint]]
+  name = "github.com/pkg/errors"
+  version = "0.8.0"
+
+[[constraint]]
+  branch = "master"
+  name = "github.com/go-redis/redis"
+
+[[constraint]]
+  branch = "master"
+  name = "github.com/vmihailenco/msgpack"
+
+[[constraint]]
+  name = "github.com/gogo/protobuf"
+  version = "1.0.0"
+
+[prune]
+  go-tests = true
+  unused-packages = true

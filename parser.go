@@ -1,7 +1,10 @@
-package ngxnet
+package sugar
 
 import (
+	"encoding/json"
 	"reflect"
+
+	"github.com/vmihailenco/msgpack"
 )
 
 type IMsgParser interface {
@@ -54,19 +57,19 @@ func (r *MsgParser) S2CString() string {
 type ParserType int
 
 const (
-	ParserTypePB   ParserType = iota //protobuf类型，用于和客户端交互
-	ParserTypeJson                   //json类型，可以用于客户端或者服务器之间交互
-	ParserTypeCmd                    //cmd类型，类似telnet指令，用于直接和程序交互
-	ParserTypeRaw                    //不做任何解析
+	ParserTypePB   ParserType = iota // protoBuf, use this type of message to communicate with client
+	ParserTypeJSON                   // json type
+	ParserTypeCmd                    // cmd type, like telnet, console
+	ParserTypeRaw                    // do not parse whatever
 )
 
 type ParseErrType int
 
 const (
-	ParseErrTypeSendRemind ParseErrType = iota //消息解析失败发送提醒消息
-	ParseErrTypeContinue                       //消息解析失败则跳过本条消息
-	ParseErrTypeAlways                         //消息解析失败依然处理
-	ParseErrTypeClose                          //消息解析失败则关闭连接
+	ParseErrTypeSendRemind ParseErrType = iota // if message parsed failed, send message tips to sender, notice sender message send failed
+	ParseErrTypeContinue                       // if message parsed failed, skip this message
+	ParseErrTypeAlways                         // if message parsed failed, still go to nex logic
+	ParseErrTypeClose                          // if message parsed failed, closed connection
 )
 
 type ParseFunc func() interface{}
@@ -85,7 +88,6 @@ type Parser struct {
 
 	msgMap  map[int]MsgParser
 	cmdRoot *cmdParseNode
-	jsonMap map[string]*jsonParseNode
 	parser  IParser
 }
 
@@ -93,19 +95,23 @@ func (r *Parser) Get() IParser {
 	switch r.Type {
 	case ParserTypePB:
 		if r.parser == nil {
-			r.parser = &pBParser{r}
-		}
-	case ParserTypeJson:
-		if r.parser == nil {
-			r.parser = &jsonParser{r}
+			r.parser = &pBParser{Parser: r}
 		}
 	case ParserTypeCmd:
-		return &cmdParser{factory: r}
+		return &cmdParser{Parser: r}
 	case ParserTypeRaw:
 		return nil
 	}
 
 	return r.parser
+}
+
+func (r *Parser) GetType() ParserType {
+	return r.Type
+}
+
+func (r *Parser) GetErrType() ParseErrType {
+	return r.ErrType
 }
 
 func (r *Parser) RegisterFunc(cmd, act uint8, c2sFunc ParseFunc, s2cFunc ParseFunc) {
@@ -134,30 +140,20 @@ func (r *Parser) Register(cmd, act uint8, c2s interface{}, s2c interface{}) {
 			return reflect.New(s2cType).Interface()
 		}
 	}
-	if c2s != nil || s2c != nil {
-		r.msgMap[CmdAct(cmd, act)] = p
-	}
+
+	r.msgMap[CmdAct(cmd, act)] = p
 }
 
 func (r *Parser) RegisterMsgFunc(c2sFunc ParseFunc, s2cFunc ParseFunc) {
-	if r.Type == ParserTypeCmd {
-		if r.cmdRoot == nil {
-			r.cmdRoot = &cmdParseNode{}
-		}
-		registerCmdParser(r.cmdRoot, c2sFunc, s2cFunc)
+	if r.cmdRoot == nil {
+		r.cmdRoot = &cmdParseNode{}
 	}
-
-	if r.Type == ParserTypeJson {
-		if r.jsonMap == nil {
-			r.jsonMap = map[string]*jsonParseNode{}
-		}
-		registerJsonParser(r.jsonMap, c2sFunc, s2cFunc)
-	}
+	registerCmdParser(r.cmdRoot, c2sFunc, s2cFunc)
 }
 
 func (r *Parser) RegisterMsg(c2s interface{}, s2c interface{}) {
-	var c2sFunc ParseFunc = nil
-	var s2cFunc ParseFunc = nil
+	var c2sFunc ParseFunc
+	var s2cFunc ParseFunc
 	if c2s != nil {
 		c2sType := reflect.TypeOf(c2s).Elem()
 		c2sFunc = func() interface{} {
@@ -171,17 +167,43 @@ func (r *Parser) RegisterMsg(c2s interface{}, s2c interface{}) {
 		}
 	}
 
-	if r.Type == ParserTypeCmd {
-		if r.cmdRoot == nil {
-			r.cmdRoot = &cmdParseNode{}
-		}
-		registerCmdParser(r.cmdRoot, c2sFunc, s2cFunc)
+	if r.cmdRoot == nil {
+		r.cmdRoot = &cmdParseNode{}
+	}
+	registerCmdParser(r.cmdRoot, c2sFunc, s2cFunc)
+}
+
+func JSONUnPack(data []byte, msg interface{}) error {
+	if data == nil || msg == nil {
+		return ErrJSONUnPack
 	}
 
-	if r.Type == ParserTypeJson {
-		if r.jsonMap == nil {
-			r.jsonMap = map[string]*jsonParseNode{}
-		}
-		registerJsonParser(r.jsonMap, c2sFunc, s2cFunc)
+	err := json.Unmarshal(data, msg)
+	if err != nil {
+		return err
 	}
+	return nil
+}
+
+func JSONPack(msg interface{}) ([]byte, error) {
+	if msg == nil {
+		return nil, ErrJSONPack
+	}
+
+	data, err := json.Marshal(msg)
+	if err != nil {
+		return nil, err
+	}
+
+	return data, nil
+}
+
+func MsgPackUnPack(data []byte, msg interface{}) error {
+	err := msgpack.Unmarshal(data, msg)
+	return err
+}
+
+func MsgPackPack(msg interface{}) ([]byte, error) {
+	data, err := msgpack.Marshal(msg)
+	return data, err
 }

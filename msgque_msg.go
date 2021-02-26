@@ -1,10 +1,8 @@
-package ngxnet
+package sugar
 
 import (
-	"bytes"
-	"encoding/binary"
-	"errors"
 	"fmt"
+	"unsafe"
 )
 
 const (
@@ -12,52 +10,83 @@ const (
 )
 
 const (
-	FlagEncrypt  = 1 << 0 //数据是经过加密的
-	FlagCompress = 1 << 1 //数据是经过压缩的
-	FlagContinue = 1 << 2 //消息还有后续
-	FlagNeedAck  = 1 << 3 //消息需要确认
-	FlagAck      = 1 << 4 //确认消息
-	FlagReSend   = 1 << 5 //重发消息
-	FlagClient   = 1 << 6 //消息来自客服端，用于判断index来之服务器还是其他玩家
+	FlagEncrypt  = 1 << 0 //encrypted data
+	FlagCompress = 1 << 1 //compressed data
+	FlagContinue = 1 << 2 //still have remain data need to be received
+	FlagNeedAck  = 1 << 3 //message should be acknowledged
+	FlagAck      = 1 << 4 //acknowledgement message
+	FlagReSend   = 1 << 5 //message been re-sent
+	FlagClient   = 1 << 6 //use this to tell the message source, internal server or published client
 )
 
 var MaxMsgDataSize uint32 = 1024 * 1024
 
 type MessageHead struct {
-	Len   uint32 //数据长度
-	Error uint16 //错误码
-	Cmd   uint8  //命令
-	Act   uint8  //动作
-	Index uint16 //序号
-	Flags uint16 //标记
+	Len   uint32
+	Error uint16
+	Cmd   uint8
+	Act   uint8
+	Index uint16
+	Flags uint16
+
+	forever bool
+	data    []byte
 }
 
 func (r *MessageHead) Bytes() []byte {
-	buf := bytes.NewBuffer(nil)
-	buf.Grow(MsgHeadSize)
-	typ := binary.LittleEndian
-	binary.Write(buf, typ, r.Len)
-	binary.Write(buf, typ, r.Error)
-	binary.Write(buf, typ, r.Cmd)
-	binary.Write(buf, typ, r.Act)
-	binary.Write(buf, typ, r.Index)
-	binary.Write(buf, typ, r.Flags)
-	return buf.Bytes()
+	if r.forever {
+		return r.data
+	}
+	data := make([]byte, MsgHeadSize)
+	phead := (*MessageHead)(unsafe.Pointer(&data[0]))
+	phead.Len = r.Len
+	phead.Error = r.Error
+	phead.Cmd = r.Cmd
+	phead.Act = r.Act
+	phead.Index = r.Index
+	phead.Flags = r.Flags
+	return data
+}
+
+func (r *MessageHead) BytesWithData(wdata []byte) []byte {
+	r.Len = uint32(len(wdata))
+	data := make([]byte, MsgHeadSize+r.Len)
+	phead := (*MessageHead)(unsafe.Pointer(&data[0]))
+	phead.Len = r.Len
+	phead.Error = r.Error
+	phead.Cmd = r.Cmd
+	phead.Act = r.Act
+	phead.Index = r.Index
+	phead.Flags = r.Flags
+	if wdata != nil {
+		copy(data[MsgHeadSize:], wdata)
+	}
+	return data
 }
 
 func (r *MessageHead) FromBytes(data []byte) error {
-	buf := bytes.NewBuffer(data)
-	typ := binary.LittleEndian
-	binary.Read(buf, typ, &r.Len)
-	binary.Read(buf, typ, &r.Error)
-	binary.Read(buf, typ, &r.Cmd)
-	binary.Read(buf, typ, &r.Act)
-	binary.Read(buf, typ, &r.Index)
-	binary.Read(buf, typ, &r.Flags)
+	if len(data) < MsgHeadSize {
+		return ErrMsgLenTooShort
+	}
+	phead := (*MessageHead)(unsafe.Pointer(&data[0]))
+	r.Len = phead.Len
+	r.Error = phead.Error
+	r.Cmd = phead.Cmd
+	r.Act = phead.Act
+	r.Index = phead.Index
+	r.Flags = phead.Flags
 	if r.Len > MaxMsgDataSize {
-		return errors.New("head len too big")
+		return ErrMsgLenTooLong
 	}
 	return nil
+}
+
+func CmdAct(cmd, act uint8) int {
+	return int(cmd)<<8 + int(act)
+}
+
+func Tag(cmd, act uint8, index uint16) int {
+	return int(cmd)<<16 + int(act)<<8 + int(index)
 }
 
 func (r *MessageHead) CmdAct() int {
@@ -73,23 +102,49 @@ func (r *MessageHead) String() string {
 }
 
 func NewMessageHead(data []byte) *MessageHead {
-	head := MessageHead{}
+	head := &MessageHead{}
 	if err := head.FromBytes(data); err != nil {
 		return nil
 	}
-	return &head
+	return head
+}
+
+func MessageHeadFromByte(data []byte) *MessageHead {
+	if len(data) < MsgHeadSize {
+		return nil
+	}
+	phead := new(*MessageHead)
+	*phead = (*MessageHead)(unsafe.Pointer(&data[0]))
+	if (*phead).Len > MaxMsgDataSize {
+		return nil
+	}
+	return *phead
 }
 
 type Message struct {
-	Head       *MessageHead //消息头，可能为nil
-	Data       []byte       //消息数据
-	IMsgParser              //解析器
-	User       interface{}  //用户自定义数据
+	Head       *MessageHead //message head, can be empty
+	Data       []byte       //message data
+	IMsgParser              //message parser
+	User       interface{}  //user self defined data
 }
 
 func (r *Message) CmdAct() int {
 	if r.Head != nil {
 		return CmdAct(r.Head.Cmd, r.Head.Act)
+	}
+	return 0
+}
+
+func (r *Message) Cmd() uint8 {
+	if r.Head != nil {
+		return r.Head.Cmd
+	}
+	return 0
+}
+
+func (r *Message) Act() uint8 {
+	if r.Head != nil {
+		return r.Head.Act
 	}
 	return 0
 }
@@ -101,6 +156,16 @@ func (r *Message) Tag() int {
 	return 0
 }
 
+func (r *Message) Bytes() []byte {
+	if r.Head != nil {
+		if r.Data != nil {
+			return r.Head.BytesWithData(r.Data)
+		}
+		return r.Head.Bytes()
+	}
+	return r.Data
+}
+
 func (r *Message) CopyTag(old *Message) *Message {
 	r.Head.Cmd = old.Head.Cmd
 	r.Head.Act = old.Head.Act
@@ -109,9 +174,9 @@ func (r *Message) CopyTag(old *Message) *Message {
 }
 
 func NewErrMsg(err error) *Message {
-	errcode, ok := errIdMap[err]
+	errcode, ok := ErrIDMap[err]
 	if !ok {
-		errcode = errIdMap[ErrErrIdNotFound]
+		errcode = ErrIDMap[ErrErrIDNotFound]
 	}
 	return &Message{
 		Head: &MessageHead{
@@ -146,6 +211,22 @@ func NewMsg(cmd, act uint8, index, err uint16, data []byte) *Message {
 		},
 		Data: data,
 	}
+}
+
+func NewForverMsg(cmd, act uint8, index, err uint16, data []byte) *Message {
+	msg := &Message{
+		Head: &MessageHead{
+			Len:     uint32(len(data)),
+			Error:   err,
+			Cmd:     cmd,
+			Act:     act,
+			Index:   index,
+			forever: true,
+		},
+		Data: data,
+	}
+	msg.Head.data = msg.Bytes()
+	return msg
 }
 
 func NewTagMsg(cmd, act uint8, index uint16) *Message {

@@ -1,4 +1,4 @@
-package ngxnet
+package sugar
 
 import (
 	"bufio"
@@ -11,40 +11,37 @@ import (
 
 type tcpMsgQue struct {
 	msgQue
-	conn       net.Conn     //连接
-	listener   net.Listener //监听
+	conn       net.Conn
+	listener   net.Listener
 	network    string
 	address    string
-	available  bool
 	wait       sync.WaitGroup
 	connecting int32
 }
 
 func (r *tcpMsgQue) GetNetType() NetType {
-	return NetTypeTcp
+	return NetTypeTCP
 }
 func (r *tcpMsgQue) Stop() {
 	if atomic.CompareAndSwapInt32(&r.stop, 0, 1) {
-		r.available = false
-		if r.init {
-			r.handler.OnDelMsgQue(r)
-			if r.connecting == 1 {
-				return
+		Go(func() {
+			if r.init {
+				r.handler.OnDelMsgQue(r)
+				if r.connecting == 1 {
+					r.available = false
+					return
+				}
 			}
-		}
-
-		if r.listener != nil {
-			if tcp, ok := r.listener.(*net.TCPListener); ok {
-				tcp.Close()
+			r.available = false
+			if r.listener != nil {
+				if tcp, ok := r.listener.(*net.TCPListener); ok {
+					tcp.Close()
+				}
 			}
-		}
 
-		r.BaseStop()
+			r.BaseStop()
+		})
 	}
-}
-
-func (r *tcpMsgQue) Available() bool {
-	return r.available
 }
 
 func (r *tcpMsgQue) IsStop() bool {
@@ -85,17 +82,17 @@ func (r *tcpMsgQue) readMsg() {
 			_, err := io.ReadFull(r.conn, headData)
 			if err != nil {
 				if err != io.EOF {
-					LogError("msgque:%v recv data err:%v", r.id, err)
+					Errorf("msgQue:%v recv data err:%v", r.id, err)
 				}
 				break
 			}
 			if head = NewMessageHead(headData); head == nil {
-				LogError("msgque:%v read msg head failed", r.id)
+				Errorf("msgQue:%v read msg head failed", r.id)
 				break
 			}
 			if head.Len == 0 {
 				if !r.processMsg(r, &Message{Head: head}) {
-					LogError("msgque:%v process msg cmd:%v act:%v", r.id, head.Cmd, head.Act)
+					Errorf("msgQue:%v process msg cmd:%v act:%v", r.id, head.Cmd, head.Act)
 					break
 				}
 				head = nil
@@ -105,12 +102,12 @@ func (r *tcpMsgQue) readMsg() {
 		} else {
 			_, err := io.ReadFull(r.conn, data)
 			if err != nil {
-				LogError("msgque:%v recv data err:%v", r.id, err)
+				Errorf("msgQue:%v recv data err:%v", r.id, err)
 				break
 			}
 
 			if !r.processMsg(r, &Message{Head: head, Data: data}) {
-				LogError("msgque:%v process msg cmd:%v act:%v", r.id, head.Cmd, head.Act)
+				Errorf("msgQue:%v process msg cmd:%v act:%v", r.id, head.Cmd, head.Act)
 				break
 			}
 
@@ -127,7 +124,7 @@ func (r *tcpMsgQue) writeMsg() {
 	for !r.IsStop() || m != nil {
 		if m == nil {
 			select {
-			case m = <-r.cwrite:
+			case m = <-r.writeCh:
 				if m != nil {
 					head = m.Head.Bytes()
 				}
@@ -140,7 +137,7 @@ func (r *tcpMsgQue) writeMsg() {
 			if writeCount < MsgHeadSize {
 				n, err := r.conn.Write(head[writeCount:])
 				if err != nil {
-					LogError("msgque write id:%v err:%v", r.id, err)
+					Errorf("msgQue write id:%v err:%v", r.id, err)
 					r.Stop()
 					break
 				}
@@ -149,8 +146,8 @@ func (r *tcpMsgQue) writeMsg() {
 
 			if writeCount >= MsgHeadSize && m.Data != nil {
 				n, err := r.conn.Write(m.Data[writeCount-MsgHeadSize : int(m.Head.Len)])
-				if err == io.EOF {
-					LogError("msgque write id:%v err:%v", r.id, err)
+				if err != nil {
+					Errorf("msgQue write id:%v err:%v", r.id, err)
 					break
 				}
 				writeCount += n
@@ -186,7 +183,7 @@ func (r *tcpMsgQue) writeCmd() {
 	for !r.IsStop() || m != nil {
 		if m == nil {
 			select {
-			case m = <-r.cwrite:
+			case m = <-r.writeCh:
 			}
 		}
 		if m != nil {
@@ -195,7 +192,7 @@ func (r *tcpMsgQue) writeCmd() {
 			}
 			n, err := r.conn.Write(m.Data[writeCount:])
 			if err != nil {
-				LogError("msgque write id:%v err:%v", r.id, err)
+				Errorf("msgQue write id:%v err:%v", r.id, err)
 				break
 			}
 			writeCount += n
@@ -211,7 +208,7 @@ func (r *tcpMsgQue) read() {
 	defer func() {
 		r.wait.Done()
 		if err := recover(); err != nil {
-			LogError("msgque read panic id:%v err:%v", r.id, err.(error))
+			Errorf("msgQue read panic id:%v err:%v", r.id, err.(error))
 			LogStack()
 		}
 		r.Stop()
@@ -229,7 +226,7 @@ func (r *tcpMsgQue) write() {
 	defer func() {
 		r.wait.Done()
 		if err := recover(); err != nil {
-			LogError("msgque write panic id:%v err:%v", r.id, err.(error))
+			Errorf("msgQue write panic id:%v err:%v", r.id, err.(error))
 		}
 		if r.conn != nil {
 			r.conn.Close()
@@ -251,22 +248,22 @@ func (r *tcpMsgQue) listen() {
 			break
 		} else {
 			Go(func() {
-				msgque := newTcpAccept(c, r.msgTyp, r.handler, r.parserFactory)
-				if r.handler.OnNewMsgQue(msgque) {
-					msgque.init = true
-					msgque.available = true
+				msgQue := newTCPAccept(c, r.msgTyp, r.handler, r.parserFactory)
+				if r.handler.OnNewMsgQue(msgQue) {
+					msgQue.init = true
+					msgQue.available = true
 					Go(func() {
-						LogInfo("process read for msgque:%d", msgque.id)
-						msgque.read()
-						LogInfo("process read end for msgque:%d", msgque.id)
+						Infof("process read for msgQue:%d", msgQue.id)
+						msgQue.read()
+						Infof("process read end for msgQue:%d", msgQue.id)
 					})
 					Go(func() {
-						LogInfo("process write for msgque:%d", msgque.id)
-						msgque.write()
-						LogInfo("process write end for msgque:%d", msgque.id)
+						Infof("process write for msgQue:%d", msgQue.id)
+						msgQue.write()
+						Infof("process write end for msgQue:%d", msgQue.id)
 					})
 				} else {
-					msgque.Stop()
+					msgQue.Stop()
 				}
 			})
 		}
@@ -276,28 +273,28 @@ func (r *tcpMsgQue) listen() {
 }
 
 func (r *tcpMsgQue) connect() {
-	LogInfo("connect to addr:%s msgque:%d", r.address, r.id)
+	Infof("connect to addr:%s msgQue:%d", r.address, r.id)
 	c, err := net.DialTimeout(r.network, r.address, time.Second)
 	if err != nil {
-		LogInfo("connect to addr:%s failed msgque:%d", r.address, r.id)
+		Infof("connect to addr:%s failed msgQue:%d", r.address, r.id)
 		r.handler.OnConnectComplete(r, false)
 		atomic.CompareAndSwapInt32(&r.connecting, 1, 0)
 		r.Stop()
 	} else {
 		r.conn = c
-		LogInfo("connect to addr:%s ok msgque:%d", r.address, r.id)
+		r.available = true
+		Infof("connect to addr:%s ok msgQue:%d", r.address, r.id)
 		if r.handler.OnConnectComplete(r, true) {
 			atomic.CompareAndSwapInt32(&r.connecting, 1, 0)
-			r.available = true
 			Go(func() {
-				LogInfo("process read for msgque:%d", r.id)
+				Infof("process read for msgQue:%d", r.id)
 				r.read()
-				LogInfo("process read end for msgque:%d", r.id)
+				Infof("process read end for msgQue:%d", r.id)
 			})
 			Go(func() {
-				LogInfo("process write for msgque:%d", r.id)
+				Infof("process write for msgQue:%d", r.id)
 				r.write()
-				LogInfo("process write end for msgque:%d", r.id)
+				Infof("process write end for msgQue:%d", r.id)
 			})
 		} else {
 			atomic.CompareAndSwapInt32(&r.connecting, 1, 0)
@@ -329,8 +326,8 @@ func (r *tcpMsgQue) Reconnect(t int) {
 	Go(func() {
 		if r.conn != nil {
 			r.conn.Close()
-			if len(r.cwrite) == 0 {
-				r.cwrite <- nil
+			if len(r.writeCh) == 0 {
+				r.writeCh <- nil
 			}
 			r.wait.Wait()
 		}
@@ -347,12 +344,12 @@ func (r *tcpMsgQue) Reconnect(t int) {
 	})
 }
 
-func newTcpConn(network, addr string, conn net.Conn, msgtyp MsgType, handler IMsgHandler, parser *Parser, user interface{}) *tcpMsgQue {
-	msgque := tcpMsgQue{
+func newTCPConn(network, addr string, conn net.Conn, msgTyp MsgType, handler IMsgHandler, parser *Parser, user interface{}) *tcpMsgQue {
+	msgQue := tcpMsgQue{
 		msgQue: msgQue{
-			id:            atomic.AddUint32(&msgQueId, 1),
-			cwrite:        make(chan *Message, 64),
-			msgTyp:        msgtyp,
+			id:            atomic.AddUint32(&msgQueID, 1),
+			writeCh:       make(chan *Message, 64),
+			msgTyp:        msgTyp,
 			handler:       handler,
 			timeout:       DefMsgQueTimeout,
 			connTyp:       ConnTypeConn,
@@ -364,20 +361,20 @@ func newTcpConn(network, addr string, conn net.Conn, msgtyp MsgType, handler IMs
 		address: addr,
 	}
 	if parser != nil {
-		msgque.parser = parser.Get()
+		msgQue.parser = parser.Get()
 	}
-	msgqueMapSync.Lock()
-	msgqueMap[msgque.id] = &msgque
-	msgqueMapSync.Unlock()
-	LogInfo("new msgque id:%d connect to addr:%s:%s", msgque.id, network, addr)
-	return &msgque
+	msgQueMapSync.Lock()
+	msgQueMap[msgQue.id] = &msgQue
+	msgQueMapSync.Unlock()
+	Infof("new msgQue id:%d connect to addr:%s:%s", msgQue.id, network, addr)
+	return &msgQue
 }
 
-func newTcpAccept(conn net.Conn, msgtyp MsgType, handler IMsgHandler, parser *Parser) *tcpMsgQue {
-	msgque := tcpMsgQue{
+func newTCPAccept(conn net.Conn, msgtyp MsgType, handler IMsgHandler, parser *Parser) *tcpMsgQue {
+	msgQue := tcpMsgQue{
 		msgQue: msgQue{
-			id:            atomic.AddUint32(&msgQueId, 1),
-			cwrite:        make(chan *Message, 64),
+			id:            atomic.AddUint32(&msgQueID, 1),
+			writeCh:       make(chan *Message, 64),
 			msgTyp:        msgtyp,
 			handler:       handler,
 			timeout:       DefMsgQueTimeout,
@@ -387,19 +384,19 @@ func newTcpAccept(conn net.Conn, msgtyp MsgType, handler IMsgHandler, parser *Pa
 		conn: conn,
 	}
 	if parser != nil {
-		msgque.parser = parser.Get()
+		msgQue.parser = parser.Get()
 	}
-	msgqueMapSync.Lock()
-	msgqueMap[msgque.id] = &msgque
-	msgqueMapSync.Unlock()
-	LogInfo("new msgque id:%d from addr:%s", msgque.id, conn.RemoteAddr().String())
-	return &msgque
+	msgQueMapSync.Lock()
+	msgQueMap[msgQue.id] = &msgQue
+	msgQueMapSync.Unlock()
+	Infof("new msgQue id:%d from addr:%s", msgQue.id, conn.RemoteAddr().String())
+	return &msgQue
 }
 
-func newTcpListen(listener net.Listener, msgtyp MsgType, handler IMsgHandler, parser *Parser, addr string) *tcpMsgQue {
-	msgque := tcpMsgQue{
+func newTCPListen(listener net.Listener, msgtyp MsgType, handler IMsgHandler, parser *Parser, addr string) *tcpMsgQue {
+	msgQue := tcpMsgQue{
 		msgQue: msgQue{
-			id:            atomic.AddUint32(&msgQueId, 1),
+			id:            atomic.AddUint32(&msgQueID, 1),
 			msgTyp:        msgtyp,
 			handler:       handler,
 			parserFactory: parser,
@@ -408,9 +405,9 @@ func newTcpListen(listener net.Listener, msgtyp MsgType, handler IMsgHandler, pa
 		listener: listener,
 	}
 
-	msgqueMapSync.Lock()
-	msgqueMap[msgque.id] = &msgque
-	msgqueMapSync.Unlock()
-	LogInfo("new tcp listen id:%d addr:%s", msgque.id, addr)
-	return &msgque
+	msgQueMapSync.Lock()
+	msgQueMap[msgQue.id] = &msgQue
+	msgQueMapSync.Unlock()
+	Infof("new tcp listen id:%d addr:%s", msgQue.id, addr)
+	return &msgQue
 }

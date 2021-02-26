@@ -1,38 +1,34 @@
-package ngxnet
+package sugar
 
 import (
-	"net"
 	"reflect"
-	"strings"
 	"sync"
 )
-
-var DefMsgQueTimeout int = 180
 
 type MsgType int
 
 const (
-	MsgTypeMsg MsgType = iota //消息基于确定的消息头
-	MsgTypeCmd                //消息没有消息头，以\n分割
+	MsgTypeMsg MsgType = iota // this type of message should have message head
+	MsgTypeCmd                // this type of message's message head can be empty, use \n as separator
 )
 
 type NetType int
 
 const (
-	NetTypeTcp NetType = iota //TCP类型
-	NetTypeUdp                //UDP类型
+	NetTypeTCP NetType = iota //TCP
+	NetTypeUDP                //UDP
 )
 
 type ConnType int
 
 const (
-	ConnTypeListen ConnType = iota //监听
-	ConnTypeConn                   //连接产生的
-	ConnTypeAccept                 //Accept产生的
+	ConnTypeListen ConnType = iota //listen type
+	ConnTypeConn                   //connected type
+	ConnTypeAccept                 //accepted type
 )
 
 type IMsgQue interface {
-	Id() uint32
+	ID() uint32
 	GetMsgType() MsgType
 	GetConnType() ConnType
 	GetNetType() NetType
@@ -52,32 +48,36 @@ type IMsgQue interface {
 	SendCallback(m *Message, c chan *Message) (re bool)
 	SetTimeout(t int)
 	GetTimeout() int
-	Reconnect(t int) //重连间隔  最小1s，此函数仅能连接关闭是调用
+	Reconnect(t int) //reconnect interval, unit: s, this function only can be invoked when connection was closed
 
 	GetHandler() IMsgHandler
 
 	SetUser(user interface{})
 	GetUser() interface{}
+	SetExtData(extData interface{})
+	GetExtData() interface{}
 
 	tryCallback(msg *Message) (re bool)
 }
 
 type msgQue struct {
-	id uint32 //唯一标示
+	id uint32 //uniquely identify
 
-	cwrite  chan *Message //写入通道
-	stop    int32         //停止标记
-	msgTyp  MsgType       //消息类型
-	connTyp ConnType      //通道类型
+	writeCh chan *Message //write channel
+	stop    int32         //stop token
+	msgTyp  MsgType       //message type
+	connTyp ConnType
 
-	handler       IMsgHandler //处理者
+	handler       IMsgHandler
 	parser        IParser
 	parserFactory *Parser
-	timeout       int //传输超时
+	timeout       int
 
 	init         bool
+	available    bool
 	callback     map[int]chan *Message
 	user         interface{}
+	extData      interface{}
 	callbackLock sync.Mutex
 }
 
@@ -85,16 +85,26 @@ func (r *msgQue) SetUser(user interface{}) {
 	r.user = user
 }
 
+func (r *msgQue) Available() bool {
+	return r.available
+}
+
 func (r *msgQue) GetUser() interface{} {
 	return r.user
+}
+
+func (r *msgQue) SetExtData(extData interface{}) {
+	r.extData = extData
+}
+
+func (r *msgQue) GetExtData() interface{} {
+	return r.extData
 }
 
 func (r *msgQue) GetHandler() IMsgHandler {
 	return r.handler
 }
-func (r *msgQue) Available() bool {
-	return true
-}
+
 func (r *msgQue) GetMsgType() MsgType {
 	return r.msgTyp
 }
@@ -103,7 +113,7 @@ func (r *msgQue) GetConnType() ConnType {
 	return r.connTyp
 }
 
-func (r *msgQue) Id() uint32 {
+func (r *msgQue) ID() uint32 {
 	return r.id
 }
 
@@ -119,7 +129,7 @@ func (r *msgQue) Reconnect(t int) {
 }
 
 func (r *msgQue) Send(m *Message) (re bool) {
-	if m == nil {
+	if m == nil || !r.available {
 		return
 	}
 	defer func() {
@@ -128,13 +138,13 @@ func (r *msgQue) Send(m *Message) (re bool) {
 		}
 	}()
 
-	r.cwrite <- m
+	r.writeCh <- m
 	return true
 }
 
 func (r *msgQue) SendCallback(m *Message, c chan *Message) (re bool) {
 	if c == nil || cap(c) < 1 {
-		LogError("try send callback but chan is null or no buffer")
+		Errorf("try send callback but chan is null or no buffer")
 		return
 	}
 	if r.Send(m) {
@@ -198,27 +208,27 @@ func (r *msgQue) setCallback(tag int, c chan *Message) {
 		r.callback = make(map[int]chan *Message)
 	}
 	oc, ok := r.callback[tag]
-	if ok { //可能已经关闭
+	if ok { // channel might be closed already
 		oc <- nil
 	}
 }
 
 func (r *msgQue) BaseStop() {
-	if r.cwrite != nil {
-		close(r.cwrite)
+	if r.writeCh != nil {
+		close(r.writeCh)
 	}
 
 	for k, v := range r.callback {
 		v <- nil
 		delete(r.callback, k)
 	}
-	msgqueMapSync.Lock()
-	delete(msgqueMap, r.id)
-	msgqueMapSync.Unlock()
-	LogInfo("msgque close id:%d", r.id)
+	msgQueMapSync.Lock()
+	delete(msgQueMap, r.id)
+	msgQueMapSync.Unlock()
+	Infof("msgQue close id:%d", r.id)
 }
 
-func (r *msgQue) processMsg(msgque IMsgQue, msg *Message) bool {
+func (r *msgQue) processMsg(msgQue IMsgQue, msg *Message) bool {
 	if r.parser != nil && msg.Data != nil {
 		mp, err := r.parser.ParseC2S(msg)
 		if err == nil {
@@ -238,21 +248,21 @@ func (r *msgQue) processMsg(msgque IMsgQue, msg *Message) bool {
 			}
 		}
 	}
-	f := r.handler.GetHandlerFunc(msgque, msg)
+	f := r.handler.GetHandlerFunc(msgQue, msg)
 	if f == nil {
 		f = r.handler.OnProcessMsg
 	}
-	return f(msgque, msg)
+	return f(msgQue, msg)
 }
 
-type HandlerFunc func(msgque IMsgQue, msg *Message) bool
+type HandlerFunc func(msgQue IMsgQue, msg *Message) bool
 
 type IMsgHandler interface {
-	OnNewMsgQue(msgque IMsgQue) bool                         //新的消息队列
-	OnDelMsgQue(msgque IMsgQue)                              //消息队列关闭
-	OnProcessMsg(msgque IMsgQue, msg *Message) bool          //默认的消息处理函数
-	OnConnectComplete(msgque IMsgQue, ok bool) bool          //连接成功
-	GetHandlerFunc(msgque IMsgQue, msg *Message) HandlerFunc //根据消息获得处理函数
+	OnNewMsgQue(msgQue IMsgQue) bool
+	OnDelMsgQue(msgQue IMsgQue)
+	OnProcessMsg(msgQue IMsgQue, msg *Message) bool //default message handler
+	OnConnectComplete(msgQue IMsgQue, ok bool) bool
+	GetHandlerFunc(msgQue IMsgQue, msg *Message) HandlerFunc
 }
 
 type IMsgRegister interface {
@@ -265,12 +275,12 @@ type DefMsgHandler struct {
 	typeMap map[reflect.Type]HandlerFunc
 }
 
-func (r *DefMsgHandler) OnNewMsgQue(msgque IMsgQue) bool                { return true }
-func (r *DefMsgHandler) OnDelMsgQue(msgque IMsgQue)                     {}
-func (r *DefMsgHandler) OnProcessMsg(msgque IMsgQue, msg *Message) bool { return true }
-func (r *DefMsgHandler) OnConnectComplete(msgque IMsgQue, ok bool) bool { return true }
-func (r *DefMsgHandler) GetHandlerFunc(msgque IMsgQue, msg *Message) HandlerFunc {
-	if msgque.tryCallback(msg) {
+func (r *DefMsgHandler) OnNewMsgQue(msgQue IMsgQue) bool                { return true }
+func (r *DefMsgHandler) OnDelMsgQue(msgQue IMsgQue)                     {}
+func (r *DefMsgHandler) OnProcessMsg(msgQue IMsgQue, msg *Message) bool { return true }
+func (r *DefMsgHandler) OnConnectComplete(msgQue IMsgQue, ok bool) bool { return true }
+func (r *DefMsgHandler) GetHandlerFunc(msgQue IMsgQue, msg *Message) HandlerFunc {
+	if msgQue.tryCallback(msg) {
 		return r.OnProcessMsg
 	}
 
@@ -292,7 +302,7 @@ func (r *DefMsgHandler) GetHandlerFunc(msgque IMsgQue, msg *Message) HandlerFunc
 func (r *DefMsgHandler) RegisterMsg(v interface{}, fun HandlerFunc) {
 	msgType := reflect.TypeOf(v)
 	if msgType == nil || msgType.Kind() != reflect.Ptr {
-		LogFatal("message pointer required")
+		Fatal("message pointer required")
 		return
 	}
 	if r.typeMap == nil {
@@ -312,55 +322,12 @@ type EchoMsgHandler struct {
 	DefMsgHandler
 }
 
-func (r *EchoMsgHandler) OnProcessMsg(msgque IMsgQue, msg *Message) bool {
-	msgque.Send(msg)
+func (r *EchoMsgHandler) OnProcessMsg(msgQue IMsgQue, msg *Message) bool {
+	msgQue.Send(msg)
 	return true
 }
 
-func StartServer(addr string, typ MsgType, handler IMsgHandler, parser *Parser) error {
-	addrs := strings.Split(addr, "://")
-	if addrs[0] == "udp" || addrs[0] == "all" {
-		naddr, err := net.ResolveUDPAddr("udp", addrs[1])
-		if err != nil {
-			LogError("listen on %s failed, errstr:%s", addr, err)
-			return err
-		}
-		conn, err := net.ListenUDP("udp", naddr)
-		if err != nil {
-			LogError("listen on %s failed, errstr:%s", addr, err)
-			return err
-		}
-		msgque := newUdpListen(conn, typ, handler, parser, addr)
-		Go(func() {
-			LogDebug("process listen for msgque:%d", msgque.id)
-			msgque.listen()
-			LogDebug("process listen end for msgque:%d", msgque.id)
-		})
-	}
-	if addrs[0] == "tcp" || addrs[0] == "all" {
-		listen, err := net.Listen("tcp", addrs[1])
-		if err == nil {
-			msgque := newTcpListen(listen, typ, handler, parser, addr)
-			Go(func() {
-				LogDebug("process listen for msgque:%d", msgque.id)
-				msgque.listen()
-				LogDebug("process listen end for msgque:%d", msgque.id)
-			})
-		} else {
-			LogError("listen on %s failed, errstr:%s", addr, err)
-		}
-		return err
-	}
-	return nil
-}
-
-func StartConnect(netype string, addr string, typ MsgType, handler IMsgHandler, parser *Parser, user interface{}) IMsgQue {
-	msgque := newTcpConn(netype, addr, nil, typ, handler, parser, user)
-	if handler.OnNewMsgQue(msgque) {
-		msgque.Reconnect(0)
-		return msgque
-	} else {
-		msgque.Stop()
-	}
-	return nil
-}
+var msgQueID uint32 //message queue ID
+var msgQueMapSync sync.Mutex
+var msgQueMap = map[uint32]IMsgQue{}
+var DefMsgQueTimeout = 180

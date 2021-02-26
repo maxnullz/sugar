@@ -1,4 +1,4 @@
-package ngxnet
+package sugar
 
 import (
 	"bytes"
@@ -25,10 +25,10 @@ type cmdParseNode struct {
 	prev    *cmdParseNode
 }
 type cmdParser struct {
-	factory *Parser
-	node    *cmdParseNode
-	values  []interface{}
-	match   CmdMatchType
+	*Parser
+	node   *cmdParseNode
+	values []interface{}
+	match  CmdMatchType
 }
 
 func (r *cmdParser) ParseC2S(msg *Message) (IMsgParser, error) {
@@ -41,7 +41,7 @@ func (r *cmdParser) ParseC2S(msg *Message) (IMsgParser, error) {
 }
 
 func (r *cmdParser) PackMsg(v interface{}) []byte {
-	data, _ := JsonPack(v)
+	data, _ := JSONPack(v)
 	if data != nil {
 		var out bytes.Buffer
 		err := json.Indent(&out, data, "", "\t")
@@ -55,24 +55,18 @@ func (r *cmdParser) PackMsg(v interface{}) []byte {
 func (r *cmdParser) GetRemindMsg(err error, t MsgType) *Message {
 	if t == MsgTypeMsg {
 		return nil
-	} else {
-		return nil
 	}
+	return nil
 }
-func (r *cmdParser) GetType() ParserType {
-	return r.factory.Type
-}
-func (r *cmdParser) GetErrType() ParseErrType {
-	return r.factory.ErrType
-}
+
 func (r *cmdParser) parserString(s string) (IMsgParser, bool) {
 	if r.node == nil {
-		r.node = r.factory.cmdRoot
+		r.node = r.cmdRoot
 	}
 	s = strings.TrimSpace(s)
-	cmds := strings.Split(s, " ")
+	cmdInfo := strings.Split(s, " ")
 
-	for _, v := range cmds {
+	for _, v := range cmdInfo {
 		if r.match == CmdMatchTypeK {
 			node, ok := r.node.next[v]
 			if !ok {
@@ -104,7 +98,7 @@ func (r *cmdParser) parserString(s string) (IMsgParser, bool) {
 			if r.node.match == CmdMatchTypeKV {
 				ins.Field(r.node.index).Set(reflect.ValueOf(r.values[i-1]))
 				i--
-			} else if r.node.kind == reflect.String && r.node != r.factory.cmdRoot {
+			} else if r.node.kind == reflect.String && r.node != r.cmdRoot {
 				ins.Field(r.node.index).SetString(r.node.name)
 			}
 			r.node = r.node.prev
@@ -117,7 +111,7 @@ func (r *cmdParser) parserString(s string) (IMsgParser, bool) {
 func registerCmdParser(root *cmdParseNode, c2sFunc ParseFunc, s2cFunc ParseFunc) {
 	msgType := reflect.TypeOf(c2sFunc())
 	if msgType == nil || msgType.Kind() != reflect.Ptr {
-		LogFatal("message pointer required")
+		Fatal("message pointer required")
 		return
 	}
 	typ := msgType.Elem()
